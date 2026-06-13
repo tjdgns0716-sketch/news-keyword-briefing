@@ -2228,7 +2228,7 @@ function buildBriefing(articles, previous, now) {
         ? "샘플 파이프라인"
         : COLLECTION_MODE === "search"
           ? "검색 API 분석"
-          : "24시간·3년전 비교",
+          : "최근 24시간",
     categories: categories.map((category) => ({
       ...category,
       words: category.words.slice(0, 5),
@@ -3594,8 +3594,7 @@ async function writeOutputs(briefing) {
 function buildRangeText(now) {
   const currentEnd = getKstParts(now);
   const currentStart = getKstParts(new Date(now.getTime() - CURRENT_WINDOW_HOURS * 60 * 60 * 1000));
-  const baselineEnd = getKstParts(shiftDateYears(now, -BASELINE_YEARS));
-  return `${currentStart.year}.${pad(currentStart.month)}.${pad(currentStart.day)} ${pad(currentStart.hour)}:${pad(currentStart.minute)} - ${currentEnd.year}.${pad(currentEnd.month)}.${pad(currentEnd.day)} ${pad(currentEnd.hour)}:${pad(currentEnd.minute)} · 비교 ${baselineEnd.year}.${pad(baselineEnd.month)}.${pad(baselineEnd.day)}`;
+  return `${currentStart.year}.${pad(currentStart.month)}.${pad(currentStart.day)} ${pad(currentStart.hour)}:${pad(currentStart.minute)} - ${currentEnd.year}.${pad(currentEnd.month)}.${pad(currentEnd.day)} ${pad(currentEnd.hour)}:${pad(currentEnd.minute)}`;
 }
 
 function getNextUpdate(now) {
