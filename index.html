@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3일 뉴스 키워드 브리핑</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="eyebrow">자동 뉴스 분석</p>
+        <h1>3일 뉴스 키워드 브리핑</h1>
+      </div>
+      <dl class="schedule">
+        <div>
+          <dt>최근 업데이트</dt>
+          <dd id="updatedAt">-</dd>
+        </div>
+        <div>
+          <dt>분석 범위</dt>
+          <dd id="rangeText">최근 3일</dd>
+        </div>
+        <div>
+          <dt>다음 업데이트</dt>
+          <dd id="nextUpdate">-</dd>
+        </div>
+        <div>
+          <dt>갱신 상태</dt>
+          <dd id="analysisStatus">-</dd>
+        </div>
+      </dl>
+    </header>
+
+    <main class="layout">
+      <section class="rankings" aria-label="분야별 키워드 순위">
+        <div id="categoryGrid" class="category-grid"></div>
+      </section>
+
+      <aside class="detail-panel" aria-live="polite">
+        <div class="detail-sticky">
+          <div class="detail-head">
+            <span id="detailMeta" class="detail-meta">-</span>
+            <h2 id="detailTitle">-</h2>
+          </div>
+
+          <div class="score-strip">
+            <div>
+              <span class="score-label">언급량</span>
+              <strong id="detailCount">-</strong>
+            </div>
+            <div>
+              <span class="score-label">증감</span>
+              <strong id="detailDelta">-</strong>
+            </div>
+          </div>
+
+          <section class="detail-section">
+            <h3 id="definitionHeading">개념</h3>
+            <div id="detailDefinition" class="detail-copy"></div>
+          </section>
+
+          <section class="detail-section">
+            <h3>최근 맥락</h3>
+            <div id="detailContext" class="detail-copy"></div>
+          </section>
+
+          <section class="detail-section">
+            <h3>함께 나온 단어</h3>
+            <ul id="detailRelated" class="chip-list"></ul>
+          </section>
+
+          <section class="detail-section">
+            <h3>관련 흐름</h3>
+            <ul id="detailArticles" class="article-list"></ul>
+          </section>
+        </div>
+      </aside>
+    </main>
+
+    <script src="./data/latest.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

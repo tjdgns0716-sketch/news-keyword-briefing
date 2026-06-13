@@ -1,0 +1,6 @@
+.env.local
+server.out.log
+server.err.log
+data/article-cache.json
+dist/
+node_modules/

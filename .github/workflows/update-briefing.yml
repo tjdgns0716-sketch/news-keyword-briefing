@@ -1,0 +1,69 @@
+name: Update and deploy briefing
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * *"
+    - cron: "30 9 * * *"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate briefing data
+        run: node scripts/generate-briefing.mjs
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          NEWS_RANGE_DAYS: 3
+          CURRENT_WINDOW_HOURS: 24
+          BASELINE_YEARS: 3
+          MAX_ARTICLES_PER_CATEGORY: 140
+          MAX_BASELINE_ARTICLES_PER_CATEGORY: 140
+          MAX_ARTICLES_PER_QUERY: 15
+          MAX_LIST_PAGES_PER_DAY: 10
+          COLLECTION_MODE: section
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.json data/latest.js
+          git diff --cached --quiet || git commit -m "Update briefing data"
+          git push
+
+      - name: Prepare static site
+        run: |
+          rm -rf dist
+          mkdir -p dist/data
+          cp index.html app.js styles.css dist/
+          cp data/latest.json data/latest.js dist/data/
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
