@@ -25,13 +25,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      - name: Sync latest branch
+        if: github.event_name != 'push'
+        run: git pull --rebase origin main
+
       - name: Generate briefing data
+        if: github.event_name != 'push'
         run: node scripts/generate-briefing.mjs
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
@@ -46,12 +53,18 @@ jobs:
           COLLECTION_MODE: section
 
       - name: Commit updated data
+        if: github.event_name != 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/latest.json data/latest.js
-          git diff --cached --quiet || git commit -m "Update briefing data"
-          git push
+          if git diff --cached --quiet; then
+            echo "No briefing data changes to commit."
+          else
+            git commit -m "Update briefing data"
+            git pull --rebase origin main
+            git push
+          fi
 
       - name: Prepare static site
         run: |
