@@ -2270,6 +2270,8 @@ const BANNED_BRIEFING_PHRASES = [
   /단어 자체보다/u,
   /구체적인 축이 충분히 분리되지 않았습니다/u,
   /설명할 수 있는 기사 맥락이 부족/u,
+  /반복 포착/u,
+  /최근 흐름은/u,
 ];
 
 const FALLBACK_CONTEXT_SENTINEL = "__INSUFFICIENT_ISSUE_CONTEXT__";
@@ -3142,22 +3144,40 @@ function buildPersonDefinition(term, category, docs, related) {
   if (!profile) {
     throw new Error(`Missing person profile for ${category.label}:${term}`);
   }
-  const role = profile.role;
+  const role = describePersonForBriefing(term, profile, category, docs);
   const summary = buildPersonIssueSummary(term, category, docs, related);
 
   return `누구인가: ${role}\n\n왜 이슈인가: ${summary.why}\n\n왜 ${category.label}에 선정됐나: ${summary.selection}`;
 }
 
+function describePersonForBriefing(term, profile, category, docs) {
+  const text = buildPersonIssueCorpus(term, docs);
+
+  if (term === "이재명" && /(대통령|국빈방문|멜로니|EU|공동성명|순방)/u.test(text)) {
+    return "대한민국 대통령으로, 정상외교와 국정 운영 메시지가 정치 기사에서 함께 다뤄지는 인물입니다.";
+  }
+
+  if (term === "한동훈" && /(부산\s*북갑|보궐선거|무소속|지역구|구포시장)/u.test(text)) {
+    return "부산 북갑 보궐선거에서 무소속으로 당선된 정치인으로, 당선 이후 지역구 행보와 보수 진영 재편 논의가 함께 보도되고 있습니다.";
+  }
+
+  if (term === "머스크" && /(스페이스X|IPO|상장|시가총액|공모가|조만장자)/u.test(text)) {
+    return "일론 머스크는 스페이스X의 최대주주이자 테슬라를 이끄는 기업인으로, 우주산업과 기술주 투자심리에 직접 영향을 주는 인물입니다.";
+  }
+
+  if (term === "최불암" && /(입원|병문안|최휘영|문체부|막걸리|국민 아버지)/u.test(text)) {
+    return "배우이자 방송인으로, 한국 대중문화에서 오래 활동한 원로 연예인입니다. 이번에는 건강 근황과 문화계 예우 차원에서 보도됐습니다.";
+  }
+
+  return profile.role;
+}
+
 function buildPersonIssueSummary(term, category, docs, related = []) {
   const text = buildPersonIssueCorpus(term, docs);
-  const topic = detectPersonIssueTopic(category.id, text);
+  const facets = detectPersonIssueFacets(category.id, text, term);
 
-  if (topic) {
-    return {
-      why: topic.why,
-      selection: topic.selection,
-      context: topic.context,
-    };
+  if (facets.length) {
+    return composePersonIssueSummary(category, facets);
   }
 
   const fallback = `${term} 관련 기사에서 이번 이슈의 구체적인 축이 충분히 분리되지 않았습니다.`;
@@ -3174,92 +3194,139 @@ function buildPersonIssueCorpus(term, docs) {
   return normalizeText(source.map((doc) => `${doc.title ?? ""} ${doc.description ?? ""}`).join(" "));
 }
 
-function detectPersonIssueTopic(categoryId, text) {
+function composePersonIssueSummary(category, facets) {
+  const selected = facets.slice(0, 2);
+  const why = selected.map((facet) => facet.why).join(" ");
+  const selection = selected.map((facet, index) => formatFacetSelection(facet, category, index)).join(" ");
+  const context = selected.map((facet, index) => formatFacetContext(facet, index)).join(" ");
+
+  return {
+    why,
+    selection,
+    context,
+  };
+}
+
+function formatFacetSelection(facet, category, index) {
+  const clause = String(facet.selection ?? "")
+    .replace(new RegExp(`^${category.label} 카테고리에 오른 이유는\\s*`), "")
+    .replace(new RegExp(`^${category.label}에 선정된 이유는\\s*`), "")
+    .replace(/^(정치|경제|사회|문화) 카테고리에 오른 이유는\s*/u, "")
+    .replace(/^(정치|경제|사회|문화)에 선정된 이유는\s*/u, "")
+    .replace(/\s*때문입니다\.?$/u, "")
+    .replace(/\.$/u, "")
+    .trim();
+  return index === 0 ? `${category.label}에 선정된 이유는 ${clause} 때문입니다.` : `또 ${clause} 때문입니다.`;
+}
+
+function formatFacetContext(facet, index) {
+  const sentence = String(facet.context ?? "").trim();
+  if (index === 0) return sentence;
+  return sentence.replace(/^맥락은\s*/u, "또 ");
+}
+
+function detectPersonIssueTopic(categoryId, text, term = "") {
+  return detectPersonIssueFacets(categoryId, text, term)[0] ?? null;
+}
+
+function detectPersonIssueFacets(categoryId, text, term = "") {
   const normalized = normalizeText(text);
-  const topics = {
+  const facets = {
     politics: [
       {
-        pattern: /국빈방문|EU|공동성명|정상회담|외교|안보/u,
-        why: "정상외교 메시지와 외교·안보 입장이 정치권 해석으로 이어진 이슈입니다.",
-        selection: "정부의 대외 입장, 정상외교, 정치권 해석이 함께 움직이는 정치 이슈에서 반복 포착됐습니다.",
-        context: "최근 흐름은 정상외교 이후 나온 공동 입장과 정치권 해석이 맞물린 쪽입니다.",
+        people: ["한동훈"],
+        pattern: /부산\s*북갑|보궐선거|무소속|지역구|결혼식|떡메치기|단오행사|구포시장/u,
+        why: "부산 북갑 보궐선거 당선 이후 지역구 행사, 시민 약속 이행, 시장 방문 같은 현장 행보가 기사화됐습니다.",
+        selection: "정치 카테고리에 오른 이유는 이 지역구 행보가 보궐선거 이후 독자 정치 행보를 보여주는 신호로 읽히기 때문입니다.",
+        context: "맥락은 당선 이후 지역구 기반을 다지고 독자 정치 행보를 넓혀 가는 흐름입니다.",
       },
       {
-        pattern: /선거|재선거|선관위|후보|보수|진보|당내|대선|지방선거|책임론/u,
-        why: "선거 구도와 정당 내부 대응, 차기 정치 구도가 함께 다뤄진 이슈입니다.",
-        selection: "선거 전략과 정당 구도를 설명하는 정치 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 선거·정당 구도와 정치적 책임론을 함께 읽어야 하는 쪽입니다.",
+        people: ["한동훈"],
+        pattern: /정점식|장동혁|의원총회|사퇴론|친한|비당권파|원내대표|보수\s*재건/u,
+        why: "정점식 원내대표 선출, 장동혁 대표 거취 논란, 친한계와 비당권파의 움직임이 보수 재건 논의와 함께 다뤄졌습니다.",
+        selection: "정치 카테고리에 오른 이유는 개인 일정이 국민의힘 내부 권력 구도와 보수 진영 재편 논의로 이어지고 있기 때문입니다.",
+        context: "맥락은 보수 진영이 선거 이후 지도부와 노선을 다시 정리하려는 국면입니다.",
       },
       {
-        pattern: /특검|재판|기소|탄핵|수사|법원|검찰/u,
-        why: "수사·재판·특검 같은 권력 감시 이슈가 정치 쟁점으로 번진 흐름입니다.",
-        selection: "사법 절차와 정치적 책임을 함께 다루는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 수사·재판 절차와 정치권 책임론이 맞물리는 쪽입니다.",
+        pattern: /국빈방문|EU|공동성명|정상회담|외교|안보|멜로니|순방/u,
+        why: "국빈방문, 정상회담, 공동성명 같은 외교 일정이 국내 정치권의 해석과 반응으로 이어졌습니다.",
+        selection: "정치 카테고리에 오른 이유는 외교 문구와 정상외교 성과가 국정 운영 평가와 여야 반응의 재료가 되기 때문입니다.",
+        context: "맥락은 정상외교에서 나온 메시지가 국내 정치 해석으로 번지는 흐름입니다.",
+      },
+      {
+        pattern: /특검|재판|기소|탄핵|수사|법원|검찰|선고|법정/u,
+        why: "수사, 재판, 특검 같은 사법 절차가 정치적 책임 논쟁으로 번졌습니다.",
+        selection: "정치 카테고리에 오른 이유는 법적 절차가 정당 간 공방과 권력 책임론으로 연결되기 때문입니다.",
+        context: "맥락은 사법 절차와 정치권 책임론이 서로 맞물리는 국면입니다.",
       },
     ],
     economy: [
       {
+        people: ["머스크"],
         pattern: /스페이스X|IPO|상장|공모가|시가총액|기술주|투자심리/u,
-        why: "스페이스X 상장과 기업가치 평가, 기술주 투자심리가 연결된 이슈입니다.",
-        selection: "스페이스X의 기업가치와 시장 반응을 설명하는 핵심 관계자로 반복 포착됐습니다.",
-        context: "최근 흐름은 스페이스X 상장, 기업가치 평가, 기술주 투자심리가 함께 움직이는 쪽입니다.",
+        why: "스페이스X 상장과 기업가치 평가가 머스크의 지분 가치, 우주산업 투자 기대, 기술주 투자심리와 함께 움직였습니다.",
+        selection: "경제 카테고리에 오른 이유는 머스크 개인보다 스페이스X 상장이 시장 가치 평가와 투자 심리를 흔드는 사건이기 때문입니다.",
+        context: "맥락은 스페이스X IPO가 머스크 자산, 우주산업 기대, 기술주 분위기를 동시에 움직인 흐름입니다.",
       },
       {
-        pattern: /관세|무역|금리|달러|증시|시장|무역정책|기준금리|중동|원유/u,
-        why: "통상·금리·달러·증시처럼 시장 가격을 흔드는 변수가 연결된 이슈입니다.",
-        selection: "정치인이라도 시장 변수로 작동하는 정책·발언·외부 충격을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 통상·금리·달러·증시 변동성이 서로 맞물리는 쪽입니다.",
+        people: ["트럼프", "파월", "이창용"],
+        pattern: /관세|무역정책|기준금리|중동|원유|달러|금리/u,
+        why: "통상, 금리, 달러, 증시처럼 시장 가격을 흔드는 변수가 함께 다뤄졌습니다.",
+        selection: "경제 카테고리에 오른 이유는 정책 발언이나 외부 충격이 시장 변수로 작동했기 때문입니다.",
+        context: "맥락은 통상 정책과 금융시장 변동성이 서로 영향을 주는 국면입니다.",
       },
       {
-        pattern: /반도체|AI|공급망|삼성전자|엔비디아|투자|비즈니스/u,
-        why: "반도체, AI, 공급망, 대기업 투자 흐름이 연결된 이슈입니다.",
-        selection: "기업 전략과 산업 투자를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 반도체·AI·공급망과 기업 투자 흐름을 함께 보는 쪽입니다.",
+        people: ["젠슨 황", "이재용", "최태원"],
+        pattern: /반도체|공급망|삼성전자|엔비디아/u,
+        why: "반도체, AI, 공급망, 대기업 투자 흐름이 함께 다뤄졌습니다.",
+        selection: "경제 카테고리에 오른 이유는 기업 전략과 산업 투자 방향을 설명하는 인물로 다뤄졌기 때문입니다.",
+        context: "맥락은 AI와 반도체 공급망을 중심으로 기업 투자가 재편되는 국면입니다.",
       },
     ],
     society: [
       {
         pattern: /서울시|시정|교통|주거|안전|도시|복지|행정/u,
         why: "도시 행정, 교통·주거·안전 같은 생활 정책이 쟁점이 된 이슈입니다.",
-        selection: "정치 구도보다 시민 생활에 영향을 주는 행정·정책 이슈에서 반복 포착됐습니다.",
-        context: "최근 흐름은 도시 행정과 생활 정책의 책임 소재를 따지는 쪽입니다.",
+        selection: "사회 카테고리에 오른 이유는 정당 구도보다 시민 생활에 영향을 주는 행정 책임이 중심이기 때문입니다.",
+        context: "맥락은 도시 행정과 생활 정책의 책임 소재를 따지는 국면입니다.",
       },
       {
         pattern: /수사|검찰|경찰|법원|재판|기소|영장|압수수색|항소심|집행유예/u,
         why: "수사·재판 절차의 진행 단계가 쟁점이 된 이슈입니다.",
-        selection: "사건의 진행 단계나 사법 절차를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 수사와 재판 절차가 어느 단계에 있는지 따지는 쪽입니다.",
+        selection: "사회 카테고리에 오른 이유는 사건이 수사나 재판 절차상 어느 단계에 있는지를 보여주기 때문입니다.",
+        context: "맥락은 수사와 재판 절차가 어느 단계에 있는지 따지는 국면입니다.",
       },
       {
         pattern: /의료|병원|환자|의대|전공의|교육|노동|재난|사고/u,
         why: "의료·교육·노동·재난 같은 사회 현안이 연결된 이슈입니다.",
-        selection: "시민 생활과 제도 운영에 영향을 주는 사회 이슈에서 반복 포착됐습니다.",
-        context: "최근 흐름은 사회 제도와 생활 현안의 영향을 함께 보는 쪽입니다.",
+        selection: "사회 카테고리에 오른 이유는 시민 생활과 제도 운영에 직접 영향을 주는 현안이기 때문입니다.",
+        context: "맥락은 사회 제도와 생활 현안의 영향을 함께 보는 국면입니다.",
       },
     ],
     culture: [
       {
+        people: ["최불암"],
         pattern: /입원|병문안|문체부|문화체육관광부|원로|배우|방송/u,
-        why: "원로 대중문화 인물의 건강 근황과 문화계 예우가 기사화된 이슈입니다.",
-        selection: "작품 홍보보다 대중문화 기억, 방송사적 상징성, 문화계 예우를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 원로 대중문화 인물의 근황과 문화계 예우를 함께 다루는 쪽입니다.",
+        why: "원로 대중문화 인물의 건강 근황과 문체부 장관의 병문안이 함께 보도됐습니다.",
+        selection: "문화 카테고리에 오른 이유는 작품 홍보가 아니라 대중문화의 상징적 인물에 대한 예우와 근황이 뉴스가 됐기 때문입니다.",
+        context: "맥락은 원로 대중문화 인물의 건강 근황과 문화계 예우를 함께 다루는 흐름입니다.",
       },
       {
         pattern: /K팝|팬덤|엔터|콘텐츠|영화|공연|전시|음악|감독|가수/u,
         why: "콘텐츠 산업, 작품 활동, 팬덤 이슈가 연결된 문화 이슈입니다.",
-        selection: "문화산업과 작품·팬덤 흐름을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 콘텐츠 산업과 작품·팬덤 움직임을 함께 보는 쪽입니다.",
+        selection: "문화 카테고리에 오른 이유는 작품 활동이 산업 구조나 팬덤 움직임과 연결됐기 때문입니다.",
+        context: "맥락은 콘텐츠 산업과 작품·팬덤 움직임을 함께 보는 흐름입니다.",
       },
       {
         pattern: /스포츠|빙상|ISU|올림픽|회장|연맹/u,
         why: "국제 스포츠 기구나 대회 운영 이슈가 연결된 문화·스포츠 이슈입니다.",
-        selection: "대회 운영, 국제기구, 스포츠 행정 흐름을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근 흐름은 스포츠 행정과 국제기구 운영을 함께 보는 쪽입니다.",
+        selection: "문화 카테고리에 오른 이유는 국제기구 운영과 스포츠 행정이 문화·스포츠 뉴스의 핵심이기 때문입니다.",
+        context: "맥락은 스포츠 행정과 국제기구 운영을 함께 보는 흐름입니다.",
       },
     ],
   };
 
-  return topics[categoryId]?.find((topic) => topic.pattern.test(normalized)) ?? null;
+  return facets[categoryId]?.filter((topic) => (!topic.people || topic.people.includes(term)) && topic.pattern.test(normalized)) ?? [];
 }
 
 function buildContext(term, type, category, related, docs = [], index = 0, baselineCount = 0) {
@@ -3475,7 +3542,7 @@ function topPersonEntries(stats, limit, category) {
   return [...stats.entries()]
     .map(([term, entry]) => {
       const titles = unique(entry.docs.map((doc) => cleanContextTitle(doc.title)).filter(isUsableArticleTitle));
-      const issueTopic = detectPersonIssueTopic(category.id, buildPersonIssueCorpus(term, entry.docs));
+      const issueTopic = detectPersonIssueTopic(category.id, buildPersonIssueCorpus(term, entry.docs), term);
       return {
         term,
         count: titles.length,
