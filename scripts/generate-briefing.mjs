@@ -2219,7 +2219,7 @@ function buildBriefing(articles, previous, now) {
 
   dedupeRepeatedCategoryWords(categories);
 
-  return {
+  const briefing = {
     generatedAt: toKstIso(now),
     nextUpdateAt: toKstIso(getNextUpdate(now)),
     rangeText: buildRangeText(now),
@@ -2235,6 +2235,9 @@ function buildBriefing(articles, previous, now) {
       people: category.people.slice(0, 3),
     })),
   };
+
+  validateBriefingQuality(briefing);
+  return briefing;
 }
 
 function dedupeRepeatedCategoryWords(categories) {
@@ -2252,6 +2255,49 @@ function dedupeRepeatedCategoryWords(categories) {
 
   for (const category of categories) {
     category.words = category.words.filter((item) => bestByTerm.get(item.term)?.categoryId === category.id);
+  }
+}
+
+const BANNED_BRIEFING_PHRASES = [
+  /__INSUFFICIENT_ISSUE_CONTEXT__/u,
+  /핵심 키워드입니다/u,
+  /반복적으로 언급된 인물입니다/u,
+  /함께 포착된 표현은/u,
+  /단순.*노출/u,
+  /같은 이슈 축으로 함께 묶였습니다/u,
+  /이슈를 설명하는 과정에서/u,
+  /사건의 배경이나 절차를 이해하는 단서/u,
+  /단어 자체보다/u,
+  /구체적인 축이 충분히 분리되지 않았습니다/u,
+  /설명할 수 있는 기사 맥락이 부족/u,
+];
+
+const FALLBACK_CONTEXT_SENTINEL = "__INSUFFICIENT_ISSUE_CONTEXT__";
+
+function validateBriefingQuality(briefing) {
+  const failures = [];
+
+  for (const category of briefing.categories) {
+    const items = [
+      ...(category.words ?? []).map((item) => ({ ...item, type: "용어" })),
+      ...(category.people ?? []).map((item) => ({ ...item, type: "인물" })),
+    ];
+
+    for (const item of items) {
+      const target = `${item.definition ?? ""}\n${item.context ?? ""}`;
+      const banned = BANNED_BRIEFING_PHRASES.find((pattern) => pattern.test(target));
+      if (banned) {
+        failures.push(`${category.label} ${item.type} ${item.term}: generic explanation matched ${banned}`);
+      }
+
+      if (category.id === "culture" && /(종전|휴전|정전|전쟁|전투기|미군|해협|이란|트럼프|중부사령부|CENTCOM|사령부|정상회담|정상회의|공동성명|양해각서|MOU|협정|서명식|안보|군사)/iu.test(item.term)) {
+        failures.push(`${category.label} ${item.type} ${item.term}: culture category contains diplomacy or military term`);
+      }
+    }
+  }
+
+  if (failures.length) {
+    throw new Error(`Briefing quality validation failed:\n${failures.slice(0, 12).join("\n")}`);
   }
 }
 
@@ -2297,7 +2343,7 @@ function analyzeCategory(category, articles) {
     docs: current.docs,
     termDocs: current.termDocs,
     personDocs,
-    words: topComparedKeywordEntries(current.stats, baseline.stats, 8, category),
+    words: topComparedKeywordEntries(current.stats, baseline.stats, 8, category, current.termDocs),
     people: topPersonEntries(personStats, 3, category),
   };
 }
@@ -3064,7 +3110,7 @@ function buildDefinition(term, type, category, docs = [], related = []) {
   const basic = GLOSSARY.get(term);
   if (basic) return basic;
 
-  return buildGenericTermDefinition(term, category, `${term}은(는) 최근 ${category.label} 기사에서 반복적으로 다뤄진 핵심 키워드입니다.`, related);
+  throw new Error(`Missing reliable term explanation for ${category.label}:${term}`);
 }
 
 function formatStructuredTermDefinition(value) {
@@ -3093,7 +3139,10 @@ function buildGenericTermDefinition(term, category, basic, related) {
 
 function buildPersonDefinition(term, category, docs, related) {
   const profile = PERSON_PROFILES.get(term);
-  const role = profile?.role ?? `${term}은(는) 최근 ${category.label} 기사에서 반복적으로 언급된 인물입니다.`;
+  if (!profile) {
+    throw new Error(`Missing person profile for ${category.label}:${term}`);
+  }
+  const role = profile.role;
   const summary = buildPersonIssueSummary(term, category, docs, related);
 
   return `누구인가: ${role}\n\n왜 이슈인가: ${summary.why}\n\n왜 ${category.label}에 선정됐나: ${summary.selection}`;
@@ -3101,22 +3150,20 @@ function buildPersonDefinition(term, category, docs, related) {
 
 function buildPersonIssueSummary(term, category, docs, related = []) {
   const text = buildPersonIssueCorpus(term, docs);
-  const relatedText = related.length ? ` 함께 포착된 표현은 ${related.slice(0, 2).join(", ")}입니다.` : "";
-
   const topic = detectPersonIssueTopic(category.id, text);
 
   if (topic) {
     return {
       why: topic.why,
-      selection: `${topic.selection}${relatedText}`,
+      selection: topic.selection,
       context: topic.context,
     };
   }
 
-  const fallback = `${category.label} 기사 묶음에서 ${term}의 이름이 반복적으로 등장했지만, 단순 이름 노출이 아니라 기사 제목과 본문에서 같은 이슈 축으로 함께 묶였습니다.`;
+  const fallback = `${term} 관련 기사에서 이번 이슈의 구체적인 축이 충분히 분리되지 않았습니다.`;
   return {
     why: fallback,
-    selection: `수집된 기사들이 같은 카테고리 안에서 ${term}을 사건·정책·산업 흐름의 이해관계자로 다뤘기 때문에 선정됐습니다.${relatedText}`,
+    selection: "설명할 수 있는 기사 맥락이 부족해 이 인물은 다음 생성 단계에서 제외되어야 합니다.",
     context: fallback,
   };
 }
@@ -3133,81 +3180,81 @@ function detectPersonIssueTopic(categoryId, text) {
     politics: [
       {
         pattern: /국빈방문|EU|공동성명|정상회담|외교|안보/u,
-        why: "외교·안보 일정과 정상외교 메시지가 정치권 반응과 함께 다뤄지면서 이 인물이 언급됐습니다.",
+        why: "정상외교 메시지와 외교·안보 입장이 정치권 해석으로 이어진 이슈입니다.",
         selection: "정부의 대외 입장, 정상외교, 정치권 해석이 함께 움직이는 정치 이슈에서 반복 포착됐습니다.",
-        context: "최근에는 외교·안보 일정과 정치권 반응을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 정상외교 이후 나온 공동 입장과 정치권 해석이 맞물린 쪽입니다.",
       },
       {
         pattern: /선거|재선거|선관위|후보|보수|진보|당내|대선|지방선거|책임론/u,
-        why: "선거 구도, 정당 내부 대응, 차기 정치 구도와 연결되면서 이 인물이 언급됐습니다.",
-        selection: "개인 동정보다 선거 전략과 정당 구도를 설명하는 정치 기사에서 반복 포착됐습니다.",
-        context: "최근에는 선거·정당 구도와 정치적 책임론을 설명하는 기사에서 이 인물이 등장했습니다.",
+        why: "선거 구도와 정당 내부 대응, 차기 정치 구도가 함께 다뤄진 이슈입니다.",
+        selection: "선거 전략과 정당 구도를 설명하는 정치 기사에서 반복 포착됐습니다.",
+        context: "최근 흐름은 선거·정당 구도와 정치적 책임론을 함께 읽어야 하는 쪽입니다.",
       },
       {
         pattern: /특검|재판|기소|탄핵|수사|법원|검찰/u,
-        why: "수사·재판·특검 같은 권력 감시 이슈가 정치 쟁점으로 번지면서 이 인물이 언급됐습니다.",
+        why: "수사·재판·특검 같은 권력 감시 이슈가 정치 쟁점으로 번진 흐름입니다.",
         selection: "사법 절차와 정치적 책임을 함께 다루는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 수사·재판 절차와 정치권 책임론이 맞물리는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 수사·재판 절차와 정치권 책임론이 맞물리는 쪽입니다.",
       },
     ],
     economy: [
       {
         pattern: /스페이스X|IPO|상장|공모가|시가총액|기술주|투자심리/u,
-        why: "상장, 기업가치, 기술주 투자심리와 연결되면서 이 인물이 경제 기사에서 언급됐습니다.",
-        selection: "개인 이름이 단순 노출된 것이 아니라 기업가치와 시장 반응을 설명하는 축으로 반복 포착됐습니다.",
-        context: "최근에는 상장과 기업가치, 기술주 투자심리를 설명하는 기사에서 이 인물이 등장했습니다.",
+        why: "스페이스X 상장과 기업가치 평가, 기술주 투자심리가 연결된 이슈입니다.",
+        selection: "스페이스X의 기업가치와 시장 반응을 설명하는 핵심 관계자로 반복 포착됐습니다.",
+        context: "최근 흐름은 스페이스X 상장, 기업가치 평가, 기술주 투자심리가 함께 움직이는 쪽입니다.",
       },
       {
         pattern: /관세|무역|금리|달러|증시|시장|무역정책|기준금리|중동|원유/u,
-        why: "통상·금리·달러·증시처럼 시장 가격을 흔드는 변수와 연결되면서 이 인물이 경제 기사에 등장했습니다.",
+        why: "통상·금리·달러·증시처럼 시장 가격을 흔드는 변수가 연결된 이슈입니다.",
         selection: "정치인이라도 시장 변수로 작동하는 정책·발언·외부 충격을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 통상·금리·달러·증시 변동성을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 통상·금리·달러·증시 변동성이 서로 맞물리는 쪽입니다.",
       },
       {
         pattern: /반도체|AI|공급망|삼성전자|엔비디아|투자|비즈니스/u,
-        why: "반도체, AI, 공급망, 대기업 투자 흐름과 연결되면서 이 인물이 경제 기사에서 언급됐습니다.",
+        why: "반도체, AI, 공급망, 대기업 투자 흐름이 연결된 이슈입니다.",
         selection: "기업 전략과 산업 투자를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 반도체·AI·공급망과 기업 투자 흐름을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 반도체·AI·공급망과 기업 투자 흐름을 함께 보는 쪽입니다.",
       },
     ],
     society: [
       {
         pattern: /서울시|시정|교통|주거|안전|도시|복지|행정/u,
-        why: "도시 행정, 교통·주거·안전 같은 생활 정책과 연결되면서 이 인물이 사회 기사에서 언급됐습니다.",
+        why: "도시 행정, 교통·주거·안전 같은 생활 정책이 쟁점이 된 이슈입니다.",
         selection: "정치 구도보다 시민 생활에 영향을 주는 행정·정책 이슈에서 반복 포착됐습니다.",
-        context: "최근에는 도시 행정과 생활 정책을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 도시 행정과 생활 정책의 책임 소재를 따지는 쪽입니다.",
       },
       {
         pattern: /수사|검찰|경찰|법원|재판|기소|영장|압수수색|항소심|집행유예/u,
-        why: "수사·재판 절차와 연결되면서 이 인물이 사회 기사에서 언급됐습니다.",
+        why: "수사·재판 절차의 진행 단계가 쟁점이 된 이슈입니다.",
         selection: "사건의 진행 단계나 사법 절차를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 수사·재판 절차를 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 수사와 재판 절차가 어느 단계에 있는지 따지는 쪽입니다.",
       },
       {
         pattern: /의료|병원|환자|의대|전공의|교육|노동|재난|사고/u,
-        why: "의료·교육·노동·재난 같은 사회 현안과 연결되면서 이 인물이 언급됐습니다.",
+        why: "의료·교육·노동·재난 같은 사회 현안이 연결된 이슈입니다.",
         selection: "시민 생활과 제도 운영에 영향을 주는 사회 이슈에서 반복 포착됐습니다.",
-        context: "최근에는 사회 제도와 생활 현안을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 사회 제도와 생활 현안의 영향을 함께 보는 쪽입니다.",
       },
     ],
     culture: [
       {
         pattern: /입원|병문안|문체부|문화체육관광부|원로|배우|방송/u,
-        why: "원로 대중문화 인물의 근황과 문화계 예우가 기사화되면서 이 인물이 언급됐습니다.",
+        why: "원로 대중문화 인물의 건강 근황과 문화계 예우가 기사화된 이슈입니다.",
         selection: "작품 홍보보다 대중문화 기억, 방송사적 상징성, 문화계 예우를 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 원로 대중문화 인물의 근황과 문화계 예우를 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 원로 대중문화 인물의 근황과 문화계 예우를 함께 다루는 쪽입니다.",
       },
       {
         pattern: /K팝|팬덤|엔터|콘텐츠|영화|공연|전시|음악|감독|가수/u,
-        why: "콘텐츠 산업, 작품 활동, 팬덤 이슈와 연결되면서 이 인물이 문화 기사에서 언급됐습니다.",
+        why: "콘텐츠 산업, 작품 활동, 팬덤 이슈가 연결된 문화 이슈입니다.",
         selection: "문화산업과 작품·팬덤 흐름을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 콘텐츠 산업과 작품·팬덤 흐름을 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 콘텐츠 산업과 작품·팬덤 움직임을 함께 보는 쪽입니다.",
       },
       {
         pattern: /스포츠|빙상|ISU|올림픽|회장|연맹/u,
-        why: "국제 스포츠 기구나 대회 운영 이슈와 연결되면서 이 인물이 문화·스포츠 기사에서 언급됐습니다.",
+        why: "국제 스포츠 기구나 대회 운영 이슈가 연결된 문화·스포츠 이슈입니다.",
         selection: "대회 운영, 국제기구, 스포츠 행정 흐름을 설명하는 기사에서 반복 포착됐습니다.",
-        context: "최근에는 스포츠 행정과 국제기구 이슈를 설명하는 기사에서 이 인물이 등장했습니다.",
+        context: "최근 흐름은 스포츠 행정과 국제기구 운영을 함께 보는 쪽입니다.",
       },
     ],
   };
@@ -3353,13 +3400,17 @@ function buildPersonIssueContext(term, category, docs, related) {
 }
 
 function buildFallbackIssueContext(term, category, docs, related, baselineCount = 0) {
-  const title = getRepresentativeTitle(docs);
-  if (title) {
-    return `최근에는 ${title} 이슈를 설명하는 과정에서 ${term}이라는 표현이 쓰였습니다. 이 표현은 기사에서 사건의 배경이나 절차를 이해하는 단서로 읽는 것이 좋습니다.`;
-  }
+  return FALLBACK_CONTEXT_SENTINEL;
+}
 
-  const relatedText = related.length ? `${related.slice(0, 2).join(", ")} 같은 주변 쟁점` : `${category.label} 분야 현안`;
-  return `최근에는 ${relatedText}을 설명하는 과정에서 ${term}이라는 표현이 쓰였습니다. 단어 자체보다 어떤 사건의 절차, 책임, 산업 구조를 가리키는지 보는 것이 중요합니다.`;
+function hasConcreteTermIssueContext(term, category, docs) {
+  if (!docs.length) return false;
+  const context = buildTermIssueContext(term, category, docs, [], 0);
+  return !isGeneratedFallbackContext(context);
+}
+
+function isGeneratedFallbackContext(value) {
+  return String(value ?? "") === FALLBACK_CONTEXT_SENTINEL;
 }
 
 function buildContextCorpus(docs) {
@@ -3424,17 +3475,20 @@ function topPersonEntries(stats, limit, category) {
   return [...stats.entries()]
     .map(([term, entry]) => {
       const titles = unique(entry.docs.map((doc) => cleanContextTitle(doc.title)).filter(isUsableArticleTitle));
+      const issueTopic = detectPersonIssueTopic(category.id, buildPersonIssueCorpus(term, entry.docs));
       return {
         term,
         count: titles.length,
         articleCount: titles.length,
         titleCount: entry.titleCount,
+        issueTopic,
         score: titles.length * 10 + entry.titleCount * 4 + categoryEvidenceScore(category.id, buildPersonIssueCorpus(term, entry.docs)),
       };
     })
     .filter((entry) => {
       if (entry.articleCount < 2) return false;
       if (entry.titleCount < 1) return false;
+      if (!entry.issueTopic) return false;
       return entry.score > 0;
     })
     .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term, "ko-KR"))
@@ -3458,7 +3512,7 @@ function topKeywordEntries(stats, limit) {
   return selected;
 }
 
-function topComparedKeywordEntries(currentStats, baselineStats, limit, category) {
+function topComparedKeywordEntries(currentStats, baselineStats, limit, category, termDocs = new Map()) {
   const selected = [];
   const sorted = [...currentStats.entries()]
     .map(([term, current]) => {
@@ -3485,12 +3539,18 @@ function topComparedKeywordEntries(currentStats, baselineStats, limit, category)
         hasAcronym,
         qualityScore,
         score,
+        docs: termDocs.get(term) ?? [],
       };
     })
     .filter((entry) => {
       const minimumCount = entry.hasAcronym ? 2 : 5;
       const minimumArticles = entry.hasAcronym && entry.count >= 4 ? 1 : 2;
-      return entry.count >= minimumCount && entry.articleCount >= minimumArticles && entry.qualityScore > -20;
+      return (
+        entry.count >= minimumCount &&
+        entry.articleCount >= minimumArticles &&
+        entry.qualityScore > -20 &&
+        hasConcreteTermIssueContext(entry.term, category, entry.docs)
+      );
     })
     .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term, "ko-KR"));
 
@@ -3499,7 +3559,8 @@ function topComparedKeywordEntries(currentStats, baselineStats, limit, category)
     const selectedTerms = selected.map((item) => item.term);
     if (isOverlappingShorterTerm(entry.term, selectedTerms)) continue;
     if (isRedundantWithSelectedTerm(entry.term, selectedTerms)) continue;
-    selected.push(entry);
+    const { docs, ...publicEntry } = entry;
+    selected.push(publicEntry);
   }
 
   return selected;
