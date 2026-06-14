@@ -1067,7 +1067,7 @@ const PERSON_PROFILES = new Map([
       role: "배우이자 방송인으로, 한국 대중문화에서 오랜 기간 활동해 온 원로 연예인입니다.",
       categories: ["culture"],
       why: {
-        culture: "배우 개인의 근황이나 방송·연예계 이슈가 문화 기사에서 다뤄질 때 인물 맥락으로 언급됩니다.",
+        culture: "입원 중인 근황과 문화체육관광부 장관의 병문안 보도가 이어지면서, 원로 대중문화 인물에 대한 예우와 방송계 기억의 맥락으로 언급됐습니다.",
       },
     },
   ],
@@ -2291,7 +2291,7 @@ function makeBriefingItem(entry, index, type, category, analyzed, previousMap) {
   const { term, count } = entry;
   const docs = type === "people" ? (analyzed.personDocs.get(term) ?? []) : (analyzed.termDocs.get(term) ?? []);
   const related = findRelatedTerms(term, docs, category).slice(0, 4);
-  const articles = unique(docs.map((doc) => doc.title).filter(Boolean)).slice(0, 3);
+  const articles = unique(docs.map((doc) => cleanContextTitle(doc.title)).filter(isUsableArticleTitle)).slice(0, 3);
   const previousCount = previousMap.get(`${category.id}:${type}:${term}`);
 
   return {
@@ -2438,6 +2438,7 @@ function isComparableTerm(term, category, people = new Set()) {
   if (isRelationshipLabelNoise(term)) return false;
   if (isOrganizationPhraseNoise(term)) return false;
   if (isLocationFragmentNoise(term)) return false;
+  if (isCategoryDomainMismatch(term, category)) return false;
   if (/스페이스\s*X/u.test(term) && term !== "스페이스X IPO" && !/(IPO|상장|공모)/u.test(term)) return false;
   if (!isTermCompatibleWithCategory(term, category)) return false;
   if (term !== "재선거" && /재선거/u.test(term)) return false;
@@ -2462,6 +2463,7 @@ function isComparableTerm(term, category, people = new Set()) {
     return false;
   }
   if (EASY_LEARNING_TERMS.has(term) && !isLikelyAcronymTerm(term)) return false;
+  if (!hasReliableTermExplanation(term)) return false;
   if (term.length < 2 || term.length > 32) return false;
   if (/^\d+$/.test(term)) return false;
   if (/^[a-z]+$/.test(term)) return false;
@@ -2483,6 +2485,16 @@ function isComparableTerm(term, category, people = new Set()) {
   if (!hasOpenEndedLearningTermShape(term)) return false;
   if (/^(있다|없다|했다|됐다|한다|된다|위해|대해|통해)$/u.test(term)) return false;
   return true;
+}
+
+function isCategoryDomainMismatch(term, category) {
+  if (category.id === "culture") {
+    return /(종전|휴전|정전|전쟁|전투기|미군|해협|이란|트럼프|중부사령부|CENTCOM|사령부|정상회담|정상회의|공동성명|양해각서|MOU|협정|서명식|안보|군사)/iu.test(
+      term,
+    );
+  }
+
+  return false;
 }
 
 function hasOpenEndedLearningTermShape(term) {
@@ -2696,6 +2708,14 @@ function canonicalTerm(term) {
     return "MOU";
   }
 
+  if (/양해\s*각서|양해각서/iu.test(trimmed)) {
+    return "MOU";
+  }
+
+  if (/GLP-?1(?:\s*계열|\s*계열\s*약물)?/iu.test(trimmed)) {
+    return "GLP-1";
+  }
+
   if (/^(?:미국|미)?\s*증권거래위원회\s*SEC$/iu.test(trimmed) || /^SEC$/iu.test(trimmed)) {
     return "SEC";
   }
@@ -2742,6 +2762,10 @@ function isSubstantiveKeyword(term, category) {
     return isComparableTerm(term, category);
   }
   return isComparableTerm(term, category);
+}
+
+function hasReliableTermExplanation(term) {
+  return GLOSSARY.has(term) || DETAILED_GLOSSARY.has(term) || TERM_PROSE_OVERRIDES.has(term);
 }
 
 function extractDynamicLearningTerms(text) {
@@ -3086,7 +3110,7 @@ function buildPersonSelectionReason(term, category, related) {
     }
 
     if (term === "최불암") {
-      return "배우 개인의 근황이나 방송·연예계 보도가 문화면에서 다뤄졌습니다. 원로 대중문화 인물의 건강, 활동, 방송 출연 소식은 작품보다 인물 자체가 문화 뉴스의 맥락이 되기 때문에 선정됐습니다.";
+      return "입원 중인 최불암을 최휘영 문화체육관광부 장관이 병문안했다는 보도가 문화면에서 반복됐습니다. 단순한 연예인 근황이라기보다, 오랜 기간 대중문화와 방송사를 대표해 온 원로 배우를 정부 문화정책 책임자가 공개적으로 찾은 장면이라 문화 카테고리에 선정됐습니다.";
     }
 
     if (term === "김윤지") {
@@ -3278,7 +3302,7 @@ function buildPersonIssueContext(term, category, docs, related) {
   }
 
   if (term === "최불암") {
-    return "최근에는 원로 배우의 건강, 활동, 방송 출연 소식이 문화면에서 다뤄지며 등장했습니다. 작품보다 인물 자체가 대중문화 기억과 방송사의 화제성을 만들어 내는 맥락입니다.";
+    return "최근에는 입원 중인 최불암을 최휘영 문화체육관광부 장관이 병문안했다는 기사에서 등장했습니다. 최불암 개인의 건강 근황과 함께, 한국 방송사를 상징하는 원로 배우에 대한 문화계 예우가 뉴스의 중심 맥락입니다.";
   }
 
   if (term === "서승미") {
@@ -3316,6 +3340,15 @@ function cleanContextTitle(value) {
     .replace(/[“”"']/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isUsableArticleTitle(value) {
+  const title = cleanContextTitle(value);
+  if (!title) return false;
+  if (compactForMatching(title).length < 6) return false;
+  if (!/[가-힣A-Za-z0-9]/u.test(title)) return false;
+  if (/^(?:여당|야당|머스크|트럼프|선거 승패 논의)$/u.test(title)) return false;
+  return true;
 }
 
 function buildPreviousMap(previous) {
