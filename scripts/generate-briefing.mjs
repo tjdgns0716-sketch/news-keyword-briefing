@@ -2256,7 +2256,7 @@ function dedupeRepeatedCategoryWords(categories) {
 }
 
 function analyzeCategory(category, articles) {
-  const personCounts = new Map();
+  const personStats = new Map();
   const personDocs = new Map();
   const currentArticles = articles.filter((article) => article.comparisonPeriod !== "baseline");
   const baselineArticles = articles.filter((article) => article.comparisonPeriod === "baseline");
@@ -2268,14 +2268,29 @@ function analyzeCategory(category, articles) {
     const titleText = `${article.title} ${article.description ?? ""}`;
     const people = new Set(Array.isArray(article.analyzedPeople) ? article.analyzedPeople : extractPeople(text));
     const relevantPeople = new Set(
-      [...people].filter((person) => isRelevantPersonForCategory(person, category, text)),
+      [...people].filter((person) => isRelevantPersonForCategory(person, category, text, titleText)),
     );
 
     for (const person of relevantPeople) {
-      increment(personCounts, person);
-      if (!personDocs.has(person)) personDocs.set(person, []);
-      personDocs.get(person).push(article);
+      const key = articleCacheKey(article);
+      const entry = personStats.get(person) ?? {
+        count: 0,
+        titleCount: 0,
+        docs: [],
+        seen: new Set(),
+      };
+
+      if (entry.seen.has(key)) continue;
+      entry.seen.add(key);
+      entry.count += 1;
+      entry.titleCount += titleText.includes(person) ? 1 : 0;
+      entry.docs.push(article);
+      personStats.set(person, entry);
     }
+  }
+
+  for (const [person, entry] of personStats.entries()) {
+    personDocs.set(person, entry.docs);
   }
 
   return {
@@ -2283,7 +2298,7 @@ function analyzeCategory(category, articles) {
     termDocs: current.termDocs,
     personDocs,
     words: topComparedKeywordEntries(current.stats, baseline.stats, 8, category),
-    people: topEntries(personCounts, 3),
+    people: topPersonEntries(personStats, 3, category),
   };
 }
 
@@ -2921,10 +2936,58 @@ function normalizePersonCandidates(value) {
   return [...candidates];
 }
 
-function isRelevantPersonForCategory(person, category, text) {
+function isRelevantPersonForCategory(person, category, text, titleText = "") {
   const profile = PERSON_PROFILES.get(person);
-  if (profile) return profile.categories.includes(category.id);
-  return false;
+  if (!profile?.categories.includes(category.id)) return false;
+  if (!personAppearsInTitleContext(person, titleText)) return false;
+
+  const combined = titleText || text;
+  const ownScore = categoryEvidenceScore(category.id, combined);
+  if (ownScore <= 0) return false;
+
+  if (category.id === "society") {
+    const politicsScore = categoryEvidenceScore("politics", combined);
+    if (politicsScore > ownScore && !/(서울시|시정|교통|주거|안전|도시|복지|행정|재난|사고|의료|교육|노동)/u.test(combined)) {
+      return false;
+    }
+  }
+
+  if (category.id === "economy") {
+    const politicsScore = categoryEvidenceScore("politics", combined);
+    if (politicsScore > ownScore && !/(증시|주가|시장|금리|관세|무역|달러|투자|상장|IPO|기업|공급망)/iu.test(combined)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function personAppearsInTitleContext(person, titleText) {
+  return normalizeText(titleText).includes(person);
+}
+
+function categoryEvidenceScore(categoryId, text) {
+  const normalized = normalizeText(text);
+  const patterns = {
+    politics: [
+      /정치|국회|정당|여당|야당|대통령|정부|장관|의원|선거|재선거|선관위|특검|탄핵|법안|상임위|외교|안보|정상회담|공동성명|국빈방문/u,
+      /보수|진보|당내|원내|대선|지방선거|책임론|후보|대표/u,
+    ],
+    economy: [
+      /경제|증시|주가|시장|금리|환율|달러|관세|무역|투자|기업|상장|IPO|공모가|시가총액|반도체|공급망|은행|금융|기술주|매출|실적/u,
+      /스페이스X|머스크|삼성전자|엔비디아|투자은행|ETF|SEC|무역정책|기준금리/u,
+    ],
+    society: [
+      /사회|사건|사고|수사|검찰|경찰|법원|재판|기소|영장|압수수색|행정|서울시|시정|교통|주거|안전|도시|복지|의료|교육|노동|재난|환경/u,
+      /대법원|병원|환자|감염|집행유예|항소심|조서|참고인/u,
+    ],
+    culture: [
+      /문화|문체부|문화체육관광부|방송|배우|가수|영화|공연|전시|콘텐츠|K팝|팬덤|음악|스포츠|빙상|ISU|원로|입원|병문안/u,
+      /드라마|예능|작품|감독|연예|대중문화|국악|유산|건강|비만|당뇨|GLP-1/u,
+    ],
+  };
+
+  return (patterns[categoryId] ?? []).reduce((score, pattern) => score + (pattern.test(normalized) ? 1 : 0), 0);
 }
 
 function scorePersonMention(person, category, titleText) {
@@ -3031,99 +3094,125 @@ function buildGenericTermDefinition(term, category, basic, related) {
 function buildPersonDefinition(term, category, docs, related) {
   const profile = PERSON_PROFILES.get(term);
   const role = profile?.role ?? `${term}은(는) 최근 ${category.label} 기사에서 반복적으로 언급된 인물입니다.`;
-  const why = profile?.why?.[category.id] ?? "최근 기사에서 특정 사건, 정책, 산업 흐름과 함께 언급되어 이슈가 된 인물입니다.";
-  const selectionReason = buildPersonSelectionReason(term, category, related);
+  const summary = buildPersonIssueSummary(term, category, docs, related);
 
-  return `누구인가: ${role}\n\n왜 이슈인가: ${why}\n\n왜 ${category.label}에 선정됐나: ${selectionReason}`;
+  return `누구인가: ${role}\n\n왜 이슈인가: ${summary.why}\n\n왜 ${category.label}에 선정됐나: ${summary.selection}`;
 }
 
-function buildPersonSelectionReason(term, category, related) {
-  if (category.id === "politics") {
-    if (term === "이재명") {
-      return "국정 운영과 여야 대립이 맞물리는 정치 현안에서 기준점처럼 다뤄졌습니다. 법안 처리, 선거 관리 논란, 외교·안보 메시지처럼 대통령실·국회·정당 반응이 동시에 움직이는 사안에서 이름이 반복적으로 등장했습니다.";
-    }
+function buildPersonIssueSummary(term, category, docs, related = []) {
+  const text = buildPersonIssueCorpus(term, docs);
+  const relatedText = related.length ? ` 함께 포착된 표현은 ${related.slice(0, 2).join(", ")}입니다.` : "";
 
-    if (term === "윤석열") {
-      return "재임 시기의 국정 운영과 사법·정치 쟁점이 다시 기사화되면서 정치 분야에 올랐습니다. 탄핵, 수사·재판, 외교·안보 판단처럼 전임 대통령의 권한 행사와 책임을 따지는 맥락에서 다뤄졌습니다.";
-    }
+  const topic = detectPersonIssueTopic(category.id, text);
 
-    if (term === "한동훈") {
-      return "보수 진영의 국회 대응과 정당 운영을 설명하는 인물로 다뤄졌습니다. 특검법 대응, 선거 전략, 당내 리더십처럼 여야 대립과 보수 진영의 선택이 동시에 걸린 사안에서 이름이 반복적으로 등장했습니다.";
-    }
-
-    if (term === "트럼프") {
-      return "미국 대선과 외교·안보 이슈가 한국 정치 뉴스에도 영향을 주면서 언급됐습니다. 특히 한미 관계, 관세, 이란·중동 정세처럼 국내 정치권이 반응하는 외부 변수와 연결됩니다.";
-    }
-
-    if (term === "오세훈") {
-      return "서울시 행정 이슈가 중앙정치의 인물 구도와 연결되면서 정치 분야에 올랐습니다. 수도권 정책, 지방정부 성과, 보수 진영의 차기 정치 구도처럼 행정과 정치가 겹치는 맥락에서 다뤄졌습니다.";
-    }
+  if (topic) {
+    return {
+      why: topic.why,
+      selection: `${topic.selection}${relatedText}`,
+      context: topic.context,
+    };
   }
 
-  if (category.id === "economy") {
-    if (term === "머스크") {
-      return "스페이스X IPO가 글로벌 증시와 기술주 흐름의 큰 이슈가 되면서 경제 분야 핵심 인물로 떠올랐습니다. 스페이스X의 기업가치, 공모가, 시가총액, 머스크의 지분 가치가 함께 다뤄졌습니다.";
-    }
+  const fallback = `${category.label} 기사 묶음에서 ${term}의 이름이 반복적으로 등장했지만, 단순 이름 노출이 아니라 기사 제목과 본문에서 같은 이슈 축으로 함께 묶였습니다.`;
+  return {
+    why: fallback,
+    selection: `수집된 기사들이 같은 카테고리 안에서 ${term}을 사건·정책·산업 흐름의 이해관계자로 다뤘기 때문에 선정됐습니다.${relatedText}`,
+    context: fallback,
+  };
+}
 
-    if (term === "이재용") {
-      return "삼성전자와 반도체, AI, 글로벌 공급망, 대기업 투자 이슈가 경제 뉴스에서 이어지며 등장했습니다. 재계 총수의 행보가 산업 협력과 투자 판단의 신호로 해석되는 맥락입니다.";
-    }
+function buildPersonIssueCorpus(term, docs) {
+  const focusedDocs = docs.filter((doc) => personAppearsInTitleContext(term, `${doc.title ?? ""} ${doc.description ?? ""}`));
+  const source = focusedDocs.length ? focusedDocs : docs;
+  return normalizeText(source.map((doc) => `${doc.title ?? ""} ${doc.description ?? ""}`).join(" "));
+}
 
-    if (term === "트럼프") {
-      return "미국의 관세·무역 정책, 중동 정세, 달러와 글로벌 증시 변동성이 한국 경제 뉴스에 영향을 주면서 언급됐습니다. 정치인이지만 시장에 영향을 주는 외부 변수로 다뤄진 경우입니다.";
-    }
+function detectPersonIssueTopic(categoryId, text) {
+  const normalized = normalizeText(text);
+  const topics = {
+    politics: [
+      {
+        pattern: /국빈방문|EU|공동성명|정상회담|외교|안보/u,
+        why: "외교·안보 일정과 정상외교 메시지가 정치권 반응과 함께 다뤄지면서 이 인물이 언급됐습니다.",
+        selection: "정부의 대외 입장, 정상외교, 정치권 해석이 함께 움직이는 정치 이슈에서 반복 포착됐습니다.",
+        context: "최근에는 외교·안보 일정과 정치권 반응을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /선거|재선거|선관위|후보|보수|진보|당내|대선|지방선거|책임론/u,
+        why: "선거 구도, 정당 내부 대응, 차기 정치 구도와 연결되면서 이 인물이 언급됐습니다.",
+        selection: "개인 동정보다 선거 전략과 정당 구도를 설명하는 정치 기사에서 반복 포착됐습니다.",
+        context: "최근에는 선거·정당 구도와 정치적 책임론을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /특검|재판|기소|탄핵|수사|법원|검찰/u,
+        why: "수사·재판·특검 같은 권력 감시 이슈가 정치 쟁점으로 번지면서 이 인물이 언급됐습니다.",
+        selection: "사법 절차와 정치적 책임을 함께 다루는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 수사·재판 절차와 정치권 책임론이 맞물리는 기사에서 이 인물이 등장했습니다.",
+      },
+    ],
+    economy: [
+      {
+        pattern: /스페이스X|IPO|상장|공모가|시가총액|기술주|투자심리/u,
+        why: "상장, 기업가치, 기술주 투자심리와 연결되면서 이 인물이 경제 기사에서 언급됐습니다.",
+        selection: "개인 이름이 단순 노출된 것이 아니라 기업가치와 시장 반응을 설명하는 축으로 반복 포착됐습니다.",
+        context: "최근에는 상장과 기업가치, 기술주 투자심리를 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /관세|무역|금리|달러|증시|시장|무역정책|기준금리|중동|원유/u,
+        why: "통상·금리·달러·증시처럼 시장 가격을 흔드는 변수와 연결되면서 이 인물이 경제 기사에 등장했습니다.",
+        selection: "정치인이라도 시장 변수로 작동하는 정책·발언·외부 충격을 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 통상·금리·달러·증시 변동성을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /반도체|AI|공급망|삼성전자|엔비디아|투자|비즈니스/u,
+        why: "반도체, AI, 공급망, 대기업 투자 흐름과 연결되면서 이 인물이 경제 기사에서 언급됐습니다.",
+        selection: "기업 전략과 산업 투자를 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 반도체·AI·공급망과 기업 투자 흐름을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+    ],
+    society: [
+      {
+        pattern: /서울시|시정|교통|주거|안전|도시|복지|행정/u,
+        why: "도시 행정, 교통·주거·안전 같은 생활 정책과 연결되면서 이 인물이 사회 기사에서 언급됐습니다.",
+        selection: "정치 구도보다 시민 생활에 영향을 주는 행정·정책 이슈에서 반복 포착됐습니다.",
+        context: "최근에는 도시 행정과 생활 정책을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /수사|검찰|경찰|법원|재판|기소|영장|압수수색|항소심|집행유예/u,
+        why: "수사·재판 절차와 연결되면서 이 인물이 사회 기사에서 언급됐습니다.",
+        selection: "사건의 진행 단계나 사법 절차를 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 수사·재판 절차를 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /의료|병원|환자|의대|전공의|교육|노동|재난|사고/u,
+        why: "의료·교육·노동·재난 같은 사회 현안과 연결되면서 이 인물이 언급됐습니다.",
+        selection: "시민 생활과 제도 운영에 영향을 주는 사회 이슈에서 반복 포착됐습니다.",
+        context: "최근에는 사회 제도와 생활 현안을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+    ],
+    culture: [
+      {
+        pattern: /입원|병문안|문체부|문화체육관광부|원로|배우|방송/u,
+        why: "원로 대중문화 인물의 근황과 문화계 예우가 기사화되면서 이 인물이 언급됐습니다.",
+        selection: "작품 홍보보다 대중문화 기억, 방송사적 상징성, 문화계 예우를 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 원로 대중문화 인물의 근황과 문화계 예우를 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /K팝|팬덤|엔터|콘텐츠|영화|공연|전시|음악|감독|가수/u,
+        why: "콘텐츠 산업, 작품 활동, 팬덤 이슈와 연결되면서 이 인물이 문화 기사에서 언급됐습니다.",
+        selection: "문화산업과 작품·팬덤 흐름을 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 콘텐츠 산업과 작품·팬덤 흐름을 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+      {
+        pattern: /스포츠|빙상|ISU|올림픽|회장|연맹/u,
+        why: "국제 스포츠 기구나 대회 운영 이슈와 연결되면서 이 인물이 문화·스포츠 기사에서 언급됐습니다.",
+        selection: "대회 운영, 국제기구, 스포츠 행정 흐름을 설명하는 기사에서 반복 포착됐습니다.",
+        context: "최근에는 스포츠 행정과 국제기구 이슈를 설명하는 기사에서 이 인물이 등장했습니다.",
+      },
+    ],
+  };
 
-    if (term === "젠슨 황") {
-      return "AI 반도체와 엔비디아를 중심으로 한 기술주 흐름 때문에 경제 분야에 등장합니다. GPU 수요, 데이터센터 투자, 반도체 공급망이 함께 움직이는 맥락입니다.";
-    }
-
-    if (term === "이창용") {
-      return "금리와 물가 판단을 설명하는 한국은행 총재 발언이 시장 전망에 영향을 주기 때문에 경제 분야에서 언급됩니다.";
-    }
-  }
-
-  if (category.id === "society") {
-    if (term === "조희대") {
-      return "대법원과 사법부 운영, 주요 재판 제도 이슈가 사회 기사에서 부각될 때 함께 언급됩니다.";
-    }
-
-    if (term === "임현택") {
-      return "의료계와 정부의 갈등, 집단휴진, 의대 정원 문제처럼 보건의료 현안이 커질 때 사회 분야에서 언급됩니다.";
-    }
-
-    if (term === "오세훈") {
-      return "서울시의 도시·교통·주거·안전 정책이 사회 이슈와 연결될 때 등장합니다.";
-    }
-  }
-
-  if (category.id === "culture") {
-    if (term === "민희진") {
-      return "K팝 산업, 팬덤, 엔터사 경영권과 IP 활용 이슈가 문화 산업 뉴스로 이어지며 언급됩니다.";
-    }
-
-    if (term === "봉준호" || term === "박찬욱") {
-      return "한국 영화의 신작, 영화제, 해외 반응이 문화 뉴스에서 다뤄질 때 대표 창작자로 언급됩니다.";
-    }
-
-    if (term === "아이유") {
-      return "음악, 연기, 공연, 팬덤 이슈가 함께 움직이는 대중문화 인물로 문화 기사에서 언급됩니다.";
-    }
-
-    if (term === "최불암") {
-      return "입원 중인 최불암을 최휘영 문화체육관광부 장관이 병문안했다는 보도가 문화면에서 반복됐습니다. 단순한 연예인 근황이라기보다, 오랜 기간 대중문화와 방송사를 대표해 온 원로 배우를 정부 문화정책 책임자가 공개적으로 찾은 장면이라 문화 카테고리에 선정됐습니다.";
-    }
-
-    if (term === "김윤지") {
-      return "한국콘텐츠진흥원장 임명 기사와 연결되어 문화 분야에 올랐습니다. 콘텐츠 산업 지원, 수출, 정책 연구를 맡는 기관의 새 수장이라는 점이 보도의 핵심입니다.";
-    }
-
-    if (term === "서승미") {
-      return "국립국악원장 임명 기사와 연결되어 문화 분야에 올랐습니다. 전통음악과 공연, 교육, 보존을 맡는 국가기관 운영 변화라는 맥락에서 언급됩니다.";
-    }
-  }
-
-  const relatedText = related.length ? ` 특히 ${related.slice(0, 2).join(", ")} 같은 쟁점과 맞물렸습니다.` : "";
-  return `수집된 기사 안에서 이 인물은 단순한 이름 노출이 아니라 정책 판단, 기관 운영, 산업 결정 중 하나의 책임자나 이해관계자로 다뤄졌습니다.${relatedText}`;
+  return topics[categoryId]?.find((topic) => topic.pattern.test(normalized)) ?? null;
 }
 
 function buildContext(term, type, category, related, docs = [], index = 0, baselineCount = 0) {
@@ -3260,56 +3349,7 @@ function buildTermIssueContext(term, category, docs, related, baselineCount = 0)
 }
 
 function buildPersonIssueContext(term, category, docs, related) {
-  const text = buildContextCorpus(docs);
-
-  if (term === "이재명") {
-    if (/(국빈방문|이탈리아|EU|공동성명|정상회담)/u.test(text)) {
-      return "최근에는 국빈방문과 한-EU 공동성명, 외교·안보 메시지를 둘러싼 기사에서 중심 인물로 등장했습니다. 이 인물 맥락은 개인 동정보다 정부의 대외 입장과 정치권 반응을 함께 읽는 쪽에 가깝습니다.";
-    }
-    return "최근에는 국정 운영과 여야 대립이 겹치는 정치 현안에서 기준점이 되는 인물로 다뤄졌습니다. 법안 처리나 선거 관리 논란처럼 대통령실·국회·정당 반응이 동시에 움직이는 사안과 연결됩니다.";
-  }
-
-  if (term === "한동훈") {
-    return "최근에는 국민의힘 내부 대응, 재선거·특검 요구, 보수 진영의 정치적 선택을 설명하는 기사에서 등장했습니다. 이 맥락에서는 개인 발언보다 당내 리더십과 여야 대립 구도를 함께 보는 것이 중요합니다.";
-  }
-
-  if (term === "윤석열") {
-    return "최근에는 평양 무인기 사건과 전직 대통령 형사재판, 국정 운영 책임을 둘러싼 기사에서 등장했습니다. 이 맥락에서는 개인 이름보다 전임 권력의 안보 판단과 사법 절차가 어디까지 이어지는지를 보는 것이 중요합니다.";
-  }
-
-  if (term === "오세훈") {
-    return "최근에는 서울시 행정 이슈가 중앙정치와 보수 진영 인물 구도로 이어지는 맥락에서 언급됐습니다. 지방정부 정책이 정치적 책임론이나 차기 구도와 연결될 때 등장하는 인물입니다.";
-  }
-
-  if (term === "머스크") {
-    return "최근에는 스페이스X IPO가 머스크의 지분 가치와 글로벌 기술주 흐름을 흔드는 이슈로 커지면서 등장했습니다. 개인 자산 뉴스처럼 보이지만 우주산업 평가와 투자심리를 함께 움직이는 맥락입니다.";
-  }
-
-  if (term === "트럼프") {
-    return "최근에는 미국의 통상·안보 정책과 중동 정세, 달러·증시 변동성이 한국 경제 뉴스에 영향을 주는 외부 변수로 등장했습니다. 정치인이지만 시장에는 관세와 무역정책의 신호로 읽힙니다.";
-  }
-
-  if (term === "젠슨 황") {
-    return "최근에는 엔비디아와 AI 반도체 수요, 데이터센터 투자 흐름을 설명하는 경제 인물로 등장했습니다. 이 인물의 발언과 행보는 기술주 투자심리와 반도체 공급망 이슈로 이어집니다.";
-  }
-
-  if (term === "이재용") {
-    return "최근에는 삼성전자와 반도체·AI 투자, 글로벌 공급망 이슈를 설명하는 재계 인물로 등장했습니다. 총수 행보가 산업 협력과 투자 판단의 신호로 해석되는 맥락입니다.";
-  }
-
-  if (term === "조희대") {
-    return "최근에는 대법원과 사법부 운영, 주요 재판 제도 이슈를 설명하는 인물로 등장했습니다. 개인 행보보다 법원 시스템과 사법부 판단의 방향을 보는 맥락입니다.";
-  }
-
-  if (term === "최불암") {
-    return "최근에는 입원 중인 최불암을 최휘영 문화체육관광부 장관이 병문안했다는 기사에서 등장했습니다. 최불암 개인의 건강 근황과 함께, 한국 방송사를 상징하는 원로 배우에 대한 문화계 예우가 뉴스의 중심 맥락입니다.";
-  }
-
-  if (term === "서승미") {
-    return "최근에는 국립국악원장 임명 보도와 함께 전통예술 기관 운영의 새 책임자로 등장했습니다. 전통음악 공연·교육·보존 정책이 앞으로 어떻게 바뀔지 보는 맥락입니다.";
-  }
-
-  return buildFallbackIssueContext(term, category, docs, related, 0);
+  return buildPersonIssueSummary(term, category, docs, related).context;
 }
 
 function buildFallbackIssueContext(term, category, docs, related, baselineCount = 0) {
@@ -3378,6 +3418,28 @@ function topEntries(counts, limit) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ko-KR"))
     .slice(0, limit)
     .map(([term, count]) => ({ term, count }));
+}
+
+function topPersonEntries(stats, limit, category) {
+  return [...stats.entries()]
+    .map(([term, entry]) => {
+      const titles = unique(entry.docs.map((doc) => cleanContextTitle(doc.title)).filter(isUsableArticleTitle));
+      return {
+        term,
+        count: titles.length,
+        articleCount: titles.length,
+        titleCount: entry.titleCount,
+        score: titles.length * 10 + entry.titleCount * 4 + categoryEvidenceScore(category.id, buildPersonIssueCorpus(term, entry.docs)),
+      };
+    })
+    .filter((entry) => {
+      if (entry.articleCount < 2) return false;
+      if (entry.titleCount < 1) return false;
+      return entry.score > 0;
+    })
+    .sort((a, b) => b.score - a.score || b.count - a.count || a.term.localeCompare(b.term, "ko-KR"))
+    .slice(0, limit)
+    .map(({ term, count }) => ({ term, count }));
 }
 
 function topKeywordEntries(stats, limit) {
