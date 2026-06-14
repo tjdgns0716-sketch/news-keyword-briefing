@@ -6,8 +6,10 @@ on:
       - main
   workflow_dispatch:
   schedule:
-    - cron: "30 22 * * *"
-    - cron: "30 9 * * *"
+    - cron: "30,45 22 * * *"
+    - cron: "0 23 * * *"
+    - cron: "30,45 9 * * *"
+    - cron: "0 10 * * *"
 
 permissions:
   contents: write
@@ -37,8 +39,13 @@ jobs:
         if: github.event_name != 'push'
         run: git pull --rebase origin main
 
+      - name: Decide whether to generate briefing
+        id: update-check
+        run: |
+          node -e "const fs=require('fs'); const event=process.env.GITHUB_EVENT_NAME; let should=event==='workflow_dispatch'; if(event==='schedule'){ try { const data=JSON.parse(fs.readFileSync('data/latest.json','utf8')); const ageHours=(Date.now()-new Date(data.generatedAt).getTime())/36e5; should=ageHours>=6; console.log('Latest briefing age:', ageHours.toFixed(2), 'hours'); } catch { should=true; } } console.log('Should generate:', should); fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_generate=' + String(should) + '\n');"
+
       - name: Generate briefing data
-        if: github.event_name != 'push'
+        if: steps.update-check.outputs.should_generate == 'true'
         run: node scripts/generate-briefing.mjs
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
@@ -53,7 +60,7 @@ jobs:
           COLLECTION_MODE: section
 
       - name: Commit updated data
-        if: github.event_name != 'push'
+        if: steps.update-check.outputs.should_generate == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
